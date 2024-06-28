@@ -4,7 +4,7 @@ from typing import List
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_huggingface.llms import HuggingFacePipeline
-from langchain.chains import LLMChain
+from langchain_core.runnables import RunnableSequence
 from langchain.prompts import PromptTemplate
 
 
@@ -21,7 +21,6 @@ class DocumentResponse(BaseModel):
     documents: List[str]
 
 
-
 app = FastAPI()
 
 # 글로벌 변수로 모델 초기화
@@ -33,9 +32,11 @@ llm = None
 def load_models():
     global embedding_model, faiss_index, llm
     if embedding_model is None:
-        embedding_model = HuggingFaceEmbeddings(model_name="jhgan/ko-sroberta-multitask")
+        embedding_model = HuggingFaceEmbeddings(
+            model_name="jhgan/ko-sroberta-multitask"
+        )
         print("Embedding model loaded")
-    
+
     if faiss_index is None:
         faiss_index = FAISS.load_local(
             folder_path="index/faiss_index",
@@ -72,24 +73,27 @@ async def generate(question: Question):
     result = faiss_index.similarity_search(question.question, k=2)
     documents = [doc.page_content for doc in result]
 
+    combined_documents = "\n\n".join(documents)  # 두 개의 문서를 하나로 합침
 
     template = """
-    질문: {question.question}
-    참고 문서: {document.page_content}
+    질문: {question}
+    참고 문서: {documents}
     답변: {answer}
     """
 
     prompt = PromptTemplate.from_template(template)
 
-    llm_chain = LLMChain(prompt=prompt, llm=llm)
+    # RunnableSequence를 사용하여 prompt와 llm을 연결
+    llm_chain = RunnableSequence(prompt | llm)
 
+    # 필요한 입력 키 'question'과 'documents'를 제공
     answer = llm_chain.invoke(
-        {"question": question.question, "document": document.page_content}
+        {"question": question.question, "documents": combined_documents, "answer": ""}
     )
 
     return ResponseModel(
         answer=answer,
-        documents=[doc.page_content for doc in result[0]],
+        documents=documents,  # 원본 문서를 리스트 형태로 유지
     )
 
 
