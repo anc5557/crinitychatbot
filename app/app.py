@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import json
 
 # FastAPI 서버의 URL 설정
 API_URL = "http://127.0.0.1:8000"
@@ -11,37 +12,53 @@ def search_question(question):
     if response.status_code == 200:
         return response.json()
     else:
-        return {"answer": "오류가 발생했습니다.", "documents": []}
+        return {"documents": []}
 
 
-def generate_answer(question):
-    """질문에 대한 답변을 생성하는 함수"""
-    response = requests.post(f"{API_URL}/generate/", json={"question": question})
+def generate_answer_stream(question):
+    """질문에 대한 답변을 스트리밍으로 생성하는 함수"""
+    response = requests.post(
+        f"{API_URL}/generate/", json={"question": question}, stream=True
+    )
     if response.status_code == 200:
-        return response.json()
+        for line in response.iter_lines():
+            if line:
+                decoded_line = line.decode("utf-8")
+                if decoded_line.startswith("data: "):
+                    yield decoded_line[len("data: ") :]
     else:
-        return {"answer": "오류가 발생했습니다.", "documents": []}
+        yield "오류가 발생했습니다."
 
 
 # Streamlit 애플리케이션의 레이아웃을 구성
-st.title("FAQ 챗봇 시스템")
+st.title("크리니티 Q&A")
 
-question = st.text_input("질문을 입력해주세요:")
 
-if st.button("검색"):
-    with st.spinner("검색 중..."):
-        search_results = search_question(question)
-        st.text("검색된 답변:")
-        st.write(search_results["answer"])
-        st.text("관련 문서:")
-        for doc in search_results["documents"]:
-            st.write(doc)
+question = st.text_input("질문을 입력해주세요:", key="question_input")
 
-if st.button("답변 생성"):
-    with st.spinner("답변 생성 중..."):
-        generated_results = generate_answer(question)
-        st.text("생성된 답변:")
-        st.write(generated_results["answer"])
-        st.text("참고한 문서:")
-        for doc in generated_results["documents"]:
-            st.write(doc)
+submit_button = st.button("답변 생성")
+
+if submit_button or st.session_state.get("submitted"):
+    with st.spinner("답변 중..."):
+        answer_placeholder = st.empty()
+        full_answer = ""
+        key_count = 0
+
+        for partial_answer in generate_answer_stream(st.session_state.question_input):
+            full_answer += partial_answer
+            key_count += 1
+            answer_placeholder.text_area(
+                "생성된 답변:",
+                full_answer,
+                height=300,
+                key=f"generated_answer_{key_count}",
+            )
+
+        # 질문에 대한 문서 출력
+        documents = search_question(st.session_state.question_input)["documents"]
+        if documents:
+            st.write("참고 문서:")
+            for document in documents:
+                st.write(document)
+        else:
+            st.write("관련 문서를 찾을 수 없습니다.")

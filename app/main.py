@@ -3,9 +3,10 @@ from pydantic import BaseModel
 from typing import List
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
-from langchain_huggingface.llms import HuggingFacePipeline
-from langchain_core.runnables import RunnableSequence
-from langchain.prompts import PromptTemplate
+from langchain.prompts import ChatPromptTemplate
+from langchain_community.llms import Ollama
+from fastapi.responses import StreamingResponse
+from langchain_core.output_parsers import StrOutputParser
 
 
 class Question(BaseModel):
@@ -31,6 +32,7 @@ llm = None
 
 def load_models():
     global embedding_model, faiss_index, llm
+
     if embedding_model is None:
         embedding_model = HuggingFaceEmbeddings(
             model_name="jhgan/ko-sroberta-multitask"
@@ -46,11 +48,7 @@ def load_models():
         print("FAISS index loaded")
 
     if llm is None:
-        llm = HuggingFacePipeline.from_model_id(
-            model_id="MLP-KTLim/llama-3-Korean-Bllossom-8B",
-            task="text-generation",
-            pipeline_kwargs={"max_new_tokens": 20},
-        )
+        llm = Ollama(model="EEVE-Korean-10.8B-Q5_K_M-GGUF")
         print("LLM model loaded")
 
 
@@ -61,40 +59,38 @@ async def startup_event():
 
 @app.post("/search/", response_model=DocumentResponse)
 async def search(question: Question):
-    result = faiss_index.similarity_search(question.question, k=2)
-    print(f"result : \n\n {result}")
+    result = faiss_index.similarity_search(question.question, k=1)
     documents = [doc.page_content for doc in result]
-    print(f"documents : \n\n {documents}")
     return DocumentResponse(documents=documents)
 
 
-@app.post("/generate/", response_model=ResponseModel)
+@app.post("/generate/")
 async def generate(question: Question):
-    result = faiss_index.similarity_search(question.question, k=2)
+    result = faiss_index.similarity_search(question.question, k=1)
     documents = [doc.page_content for doc in result]
+    context = "\n\n".join(documents)
 
-    combined_documents = "\n\n".join(documents)  # 두 개의 문서를 하나로 합침
+    system = """당신은 질문-답변(Question-Answering)을 수행하는 친절한 AI 어시스턴트입니다. 당신의 임무는 주어진 문맥(context) 에서 주어진 질문(question) 에 답하는 것입니다.
+    검색된 다음 문맥(context) 을 사용하여 질문(question) 에 답하세요. 만약, 주어진 문맥(context) 에서 답을 찾을 수 없다면, 답을 모른다면 `주어진 정보에서 질문에 대한 정보를 찾을 수 없습니다` 라고 답하세요.
+    한글로 답변해 주세요. 단, 기술적인 용어나 이름은 번역하지 않고 그대로 사용해 주세요. Don't narrate the answer, just answer the question. Let's think step-by-step."""
 
-    template = """
-    질문: {question}
-    참고 문서: {documents}
-    답변: {answer}
-    """
+    human = """#Question: 
+    {question} 
 
-    prompt = PromptTemplate.from_template(template)
+    #Context: 
+    {context} 
 
-    # RunnableSequence를 사용하여 prompt와 llm을 연결
-    llm_chain = RunnableSequence(prompt | llm)
+    #Answer:"""
 
-    # 필요한 입력 키 'question'과 'documents'를 제공
-    answer = llm_chain.invoke(
-        {"question": question.question, "documents": combined_documents, "answer": ""}
-    )
+    prompt = ChatPromptTemplate.from_messages([("system", system), ("human", human)])
 
-    return ResponseModel(
-        answer=answer,
-        documents=documents,  # 원본 문서를 리스트 형태로 유지
-    )
+    chain = prompt | llm | StrOutputParser()
+
+    def answer_streamer():
+        for chunk in chain.stream({"question": question.question, "context": context}):
+            yield f"data: {chunk}\n\n"
+
+    return StreamingResponse(answer_streamer(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
